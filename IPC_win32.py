@@ -42,29 +42,29 @@ class Win32NamedPipe(IPC_common.NamedPipe):
             )
         except pywintypes.error as e:
             if e.winerror == winerror.ERROR_PIPE_BUSY:
-                return IPC_common.IPCResult(False, IPC_common.FailureReason.AlreadyExisting)
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.AlreadyExisting, None)
             else:
                 raise
         if handle == win32file.INVALID_HANDLE_VALUE:
-            return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherFailure)
+            return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherFailure, None)
 
         self.PipeHandle = handle
         self.IsServer = True
-        return IPC_common.IPCResult(True, None)
+        return IPC_common.IPCResult(True, None, None)
 
     def _serverConnect(self) -> IPC_common.IPCResult:
         try:
             win32pipe.ConnectNamedPipe(self.PipeHandle, None)
         except pywintypes.error as e:
             if e.winerror == winerror.ERROR_NO_DATA:
-                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideClosed)
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideClosed, None)
             elif e.winerror == winerror.ERROR_PIPE_CONNECTED:
-                return IPC_common.IPCResult(False, IPC_common.FailureReason.AlreadyExisting)
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.AlreadyExisting, None)
             else:
                 raise
 
         self.Opened = True
-        return IPC_common.IPCResult(True, None)
+        return IPC_common.IPCResult(True, None, None)
 
     def _clientConnect(self) -> IPC_common.IPCResult:
         handle = win32file.INVALID_HANDLE_VALUE
@@ -80,17 +80,17 @@ class Win32NamedPipe(IPC_common.NamedPipe):
             )
         except pywintypes.error as e:
             if e.winerror == winerror.ERROR_FILE_NOT_FOUND:
-                return IPC_common.IPCResult(False, IPC_common.FailureReason.NotExisting)
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.NotExisting, None)
             elif e.winerror == winerror.ERROR_PIPE_BUSY:
-                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideCongested)
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideCongested, None)
             else:
                 raise
         if handle == win32file.INVALID_HANDLE_VALUE:
-            return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherFailure)
+            return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherFailure, None)
         win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_MESSAGE, None, None)
         self.PipeHandle = handle
         self.Opened = True
-        return IPC_common.IPCResult(True, None)
+        return IPC_common.IPCResult(True, None, None)
 
     def Connect(self) -> concurrent.futures.Future[IPC_common.IPCResult]:
         if self._InternalThreadPool is None:
@@ -119,67 +119,84 @@ class Win32NamedPipe(IPC_common.NamedPipe):
     def Close(self):
         if self.PipeHandle is None:
             return
+        self._InternalThreadPool.shutdown(wait=False, cancel_futures=True)
         self.AbortPendingOperations()
-        self._InternalThreadPool.shutdown(wait=True, cancel_futures=True)
         self._InternalThreadPool = None
+        self.Opened = False
 
         win32file.CloseHandle(self.PipeHandle)
         self.PipeHandle = None
 
-    def _read(self) -> bytes:
+    def _read(self) -> IPC_common.IPCResult:
         if self.PipeHandle is None or not self.Opened:
             raise ValueError("Pipe is not open.")
 
+        self._PendingReadCount += 1
         buffer = io.BytesIO()
         while True:
-            (errorcode, data) = win32file.ReadFile(self.PipeHandle, 4096, None)
+            try:
+                (errorcode, data) = win32file.ReadFile(self.PipeHandle, 4096, None)
+            except pywintypes.error as e:
+                if e.winerror == winerror.ERROR_BROKEN_PIPE:
+                    return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideClosed, None)
+                else:
+                    raise
             buffer.write(data)
             if errorcode == 0:
                 break
-        return buffer.getvalue()
-    def Read(self) -> concurrent.futures.Future[bytes]:
+        return IPC_common.IPCResult(True, None, buffer.getvalue())
+    def Read(self) -> concurrent.futures.Future[IPC_common.IPCResult]:
         def done(_):
             self._PendingReadCount -= 1
-        self._PendingReadCount += 1
         f = self._InternalThreadPool.submit(self._read)
         f.add_done_callback(done)
         return f
 
-    def _write(self, data: bytes, waitForRead: bool):
+    def _write(self, data: bytes, waitForRead: bool) -> IPC_common.IPCResult:
         if self.PipeHandle is None or not self.Opened:
             raise ValueError("Pipe is not open.")
 
-        (errorcode, written) = win32file.WriteFile(self.PipeHandle, data, None)
-        if waitForRead:
-            win32file.FlushFileBuffers(self.PipeHandle)
-    def Write(self, data: bytes, waitForRead: bool = False) -> concurrent.futures.Future:
+        self._PendingWriteCount += 1
+        try:
+            (errorcode, written) = win32file.WriteFile(self.PipeHandle, data, None)
+            if waitForRead:
+                win32file.FlushFileBuffers(self.PipeHandle)
+        except pywintypes.error as e:
+            if e.winerror == winerror.ERROR_BROKEN_PIPE:
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideClosed, None)
+            else:
+                raise
+        return IPC_common.IPCResult(True, None, None)
+    def Write(self, data: bytes, waitForRead: bool = False) -> concurrent.futures.Future[IPC_common.IPCResult]:
         def done(_):
             self._PendingWriteCount -= 1
-        self._PendingWriteCount += 1
         f = self._InternalThreadPool.submit(self._write, data, waitForRead)
         f.add_done_callback(done)
         return f
 
-    def _peek(self) -> bool:
+    def _peek(self) -> IPC_common.IPCResult:
         if self.PipeHandle is None or not self.Opened:
             raise ValueError("Pipe is not open.")
 
-        result = win32pipe.PeekNamedPipe(
-            self.PipeHandle, 0
-        )
+        try:
+            result = win32pipe.PeekNamedPipe(self.PipeHandle, 0)
+        except pywintypes.error as e:
+            if e.winerror == winerror.ERROR_BROKEN_PIPE:
+                return IPC_common.IPCResult(False, IPC_common.FailureReason.OtherSideClosed, None)
+            else:
+                raise
+
         if result is None:
-            return False
-
+            return IPC_common.IPCResult(True, None, False)
         (data, total, left) = result
-        return left > 0
+        return IPC_common.IPCResult(True, None, len(data) > 0 or left > 0)
 
-    def Peek(self) -> concurrent.futures.Future[bool]:
+    def Peek(self) -> concurrent.futures.Future[IPC_common.IPCResult]:
         return self._InternalThreadPool.submit(self._peek)
 
     def AbortPendingOperations(self):
-        return
-        #if self._PendingConnect == False and self._PendingReadCount == 0 and self._PendingWriteCount == 0:
-        #    return
+        if self._PendingConnect:
+            pass
         #with Win32NamedPipe(self.Name) as (throwawayPipe, connectdFuture):
         #    connectdFuture.result()
 

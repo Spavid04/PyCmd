@@ -17,6 +17,7 @@ class FailureReason(enum.Enum):
 class IPCResult():
     Success: bool
     Reason: typing.Optional[FailureReason]
+    Value: typing.Any
 
 class NamedPipe(abc.ABC):
     def __init__(self, name: str):
@@ -28,9 +29,9 @@ class NamedPipe(abc.ABC):
     def Disconnect(self): pass
     def Close(self): pass
 
-    def Read(self) -> concurrent.futures.Future[bytes]: pass
-    def Write(self, data: bytes, waitForRead: bool = False) -> concurrent.futures.Future: pass
-    def Peek(self) -> concurrent.futures.Future[bool]: pass
+    def Read(self) -> concurrent.futures.Future[IPCResult]: pass
+    def Write(self, data: bytes, waitForRead: bool = False) -> concurrent.futures.Future[IPCResult]: pass
+    def Peek(self) -> concurrent.futures.Future[IPCResult]: pass
 
     def AbortPendingOperations(self): pass
 
