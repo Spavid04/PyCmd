@@ -7,6 +7,7 @@ import typing
 
 class FailureReason(enum.Enum):
     OtherFailure = enum.auto()
+    Aborted = enum.auto()
 
     NotExisting = enum.auto()
     AlreadyExisting = enum.auto()
@@ -19,6 +20,9 @@ class IPCResult():
     Reason: typing.Optional[FailureReason]
     Value: typing.Any
 
+    def __bool__(self):
+        return self.Success
+
 class NamedPipe(abc.ABC):
     def __init__(self, name: str):
         self.Name = name
@@ -30,7 +34,7 @@ class NamedPipe(abc.ABC):
     def Close(self): pass
 
     def Read(self) -> concurrent.futures.Future[IPCResult]: pass
-    def Write(self, data: bytes, waitForRead: bool = False) -> concurrent.futures.Future[IPCResult]: pass
+    def Write(self, data: bytes) -> concurrent.futures.Future[IPCResult]: pass
     def Peek(self) -> concurrent.futures.Future[IPCResult]: pass
 
     def AbortPendingOperations(self): pass
